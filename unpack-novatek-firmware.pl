@@ -24,6 +24,7 @@
 use strict;
 
 my $write = 0;
+my $fix = 0;
 my $inject = 0;
 my $newimage = "";
 
@@ -101,6 +102,11 @@ if ( $ARGV[0] eq "-w" ) {
     shift();
 }
 
+if ( $ARGV[0] eq "-f" ) {
+    $fix++;
+    shift();
+}
+
 if ( $ARGV[0] eq "-i" ) {
     # if -i <newimage> <pakfile> is specified, we are going to inject the file specified as <newimage> into the file
     $inject++;
@@ -120,7 +126,7 @@ if ($inject){
     print("Going to inject the file '".$newimage."' into the image '".$f."' \n") ;
     print(" the output file will be named '".$newname."' \n");
     print(" cancel now if this is not desired or press enter");
-    <STDIN>;
+    #TODO: enable: <STDIN>;
 }
 
 my $binheader;
@@ -136,10 +142,17 @@ my $binsectiondata;
 # 716    836    ToC (836 = 11*76 bytes) partition name - dst - offset - ? - size
 
 read( IF, $binheader, 1552 ) == 1552 || die("Invalid input file - no header");
-read( IF, $binsectiondata, ( -s $f ) - 1552 ) > 0 || die("Invalid input file - no section data");
+printf( "first 12 bytes of binheader is : %s\n", unpack( "H*", substr( $binheader, 0, 12 ) ) );
+print("length of file is    " . ( -s $f ) . "\n");
+my $bindatalen = read( IF, $binsectiondata, ( -s $f ) - 1552 ) ;
+$bindatalen > 0 || die("Invalid input file - no section data");
+print( "Length of binsectiondata is $bindatalen\n");
+printf( "first 12 bytes of binsectiondata is : %s\n", unpack( "H*", substr( $binsectiondata, 0, 12 ) ) );
+
 close (IF);
 
 substr( $binheader, 0, 4 ) eq "\x13\x59\x72\x32" || die("Invalid file magic");
+printf( "first 12 bytes of binheader is     : %s\n", unpack( "H*", substr( $binheader, 0, 12 ) ) );
 
 my $btype = substr( $binheader, 8, 4 );
 my $btypenulled = substr( $binheader, 8, 1 ) . chr(0) . substr( $binheader, 10, 2 );
@@ -147,18 +160,41 @@ printf( "Board/File-Type: %s\n", unpack( "H*", $btype ) );
 substr( $btype, 1, 1 ) eq "\x24" || die("This script support 0x24-format files only. Remove this check at your own risk");
 printf( "Board/File-Type with 0x00\@pos2: %s\n", unpack( "H*", $btypenulled ) );
 
-my $fcrc = substr( $binheader, 4, 4 );
+my $fcrc = substr( $binheader, 4, 4 );   # bytes 5,6,7,8 are the crc
 printf( "File CRC: %s\n", unpack( "H*", $fcrc ) );
 
 my $ccrc = crc32calc( 0, $binsectiondata );
 $ccrc = crc32calc( $ccrc, $btypenulled );
 $ccrc = crc32calc( $ccrc, substr( $binheader, 12, 704 ) );
 # partition ToC is not crc-checked, oughhh ...
-
 my $pccrc = pack( "V*", $ccrc );
 printf( "Calc CRC: %s\n", unpack( "H*", $pccrc ) );
+
+open( NI, ">payload_old.bin" );
+binmode(NI);
+print NI $binsectiondata;
+close(NI);
+
 if ( $fcrc ne $pccrc ) {
     print "Warning: File CRC does NOT match computed CRC value!\n";
+    if ($fix){
+        # fixing the bad crc
+        my $fixed_outfile = $f . "_fixed";
+        print("Fixing the file CRC to the correct CRC of    ".unpack( "H*", $pccrc )."\n");
+
+        printf( "first 12 bytes of binheader is     : %s\n", unpack( "H*", substr( $binheader, 0, 12 ) ) );
+        my $new_binheader = $binheader;
+        substr( $new_binheader, 4, 4 ) = $pccrc;
+        printf( "first 12 bytes of new_binheader is : %s\n", unpack( "H*", substr( $new_binheader, 0, 12 ) ) );
+
+        open( OF, ">$fixed_outfile" ) || die( "Unable to open output file '$fixed_outfile': " . $! );
+        binmode(OF);
+        print OF $new_binheader;
+        print OF $binsectiondata;
+        close(OF);
+        print("Done, wrote file "+$fixed_outfile);
+        exit(0)
+    }
 } else {
     print "File CRC and computed CRC match, everything is ok.\n";
 }
@@ -170,11 +206,19 @@ for ( my $s = 0 ; $s < 11 ; $s++ ) {
     my $sname = substr( $binheader, $offset +  0, 32 ); $sname =~ s/[^[:print:]]//g;
     my $sver  = substr( $binheader, $offset + 32, 24 ); $sver  =~ s/[^[:print:]]//g;
     my $soff  = unpack( "V", substr( $binheader, $offset + 56, 4 ) );
+
     my $slen  = unpack( "V", substr( $binheader, $offset + 60, 4 ) );
+
 
     printf("Image File Section %2d    name: %s\n", $s, $sname );
     printf("Image File Section %2d version: %s\n" , $s, $sver );
+    printf(" offset at offset %2d is %s\n",$offset + 56 ,unpack( "H*", substr( $binheader, $offset + 56, 4 ) ));
+    printf("  packed its %s\n",unpack( "H*", pack( "V", $soff ) ));
     printf("Image File Section %2d  offset: %8d\n", $s, $soff );
+    printf(" length at offset %2d is %s\n",$offset + 60 ,unpack( "H*", substr( $binheader, $offset + 60, 4 ) ));
+    printf(" packed length its %s\n",unpack( "H*", pack( "V", $slen ) ));
+    my $newlen = 123456789;
+    printf(" packed newlength its %s\n",unpack( "H*", pack( "V", $newlen ) ));
     printf("Image File Section %2d  length: %8d\n", $s, $slen );
 
     if ($inject and $sname eq"fs"){
@@ -187,7 +231,9 @@ for ( my $s = 0 ; $s < 11 ; $s++ ) {
         my $len_newimage_packed  = pack( "V", $len_newimage );
         print(" read ".$len_newimage." bytes from newimage '".$newimage."' to var newimagedata\n");
         printf(" the old fs image had ".$slen." (0x%X)(".unpack( "H*", pack( "V", $slen ) ).") bytes, the new one has ".$len_newimage." (0x%X)(".unpack( "H*", $len_newimage_packed ).") bytes\n",$slen,$len_newimage);
-
+        #wait for key press
+        print("break: ");
+        <STDIN>;
         # the new firmware file will have the following structure
         #1. binheader
         #2. old contents until the fs part
@@ -196,24 +242,41 @@ for ( my $s = 0 ; $s < 11 ; $s++ ) {
         my $new_binheader = $binheader;
         # write the new size of the fs image to the new header
         substr( $new_binheader, $offset + 60, 4 ) = $len_newimage_packed;
+        print("break: ");
+        <STDIN>;
 
         # now lets build the payload
         printf(" Combining the first 0x%X bytes from the original image\n",$soff-1552);
         print(" with the contents of the new input file\n");
         my $payload = substr( $binsectiondata, 0, $soff-1552 ) . $newimagedata;
-
+        open( NI, ">payload_new.bin" );
+        binmode(NI);
+        print NI $payload;
+        close(NI);
         # now we need to calculate the crc:
         my $newcrc = crc32calc( 0, $payload );
         $newcrc = crc32calc( $newcrc, $btypenulled );
         $newcrc = crc32calc( $newcrc, substr( $new_binheader, 12, 704 ) );
         my $newpccrc = pack( "V*", $newcrc );
         printf( "the new CRC would be: %s\n", unpack( "H*", $newpccrc ) );
-
+        #wait for key press
+        print("break: ");
+        <STDIN>;
+        printf( "first 12 bytes of binheader is     : %s\n", unpack( "H*", substr( $binheader, 0, 12 ) ) );
+        substr( $new_binheader, 4, 4 ) = $newpccrc;
+        printf( "first 12 bytes of new_binheader is : %s\n", unpack( "H*", substr( $new_binheader, 0, 12 ) ) );
+        #wait for key press
+        print("break: ");
+        <STDIN>;
+        # todo: all at the end
         print "Writing output file '" . $newname . "'\n";
         open( NI, ">$newname" ) || die( "Unable to open output file '$newname': " . $! );
         binmode(NI);
         print NI $new_binheader . $payload;
         close(NI);
+        #wait for key press
+        print("break: ");
+        <STDIN>;
     }
 
 
